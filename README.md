@@ -9,7 +9,7 @@ A wikipedia based Handwriting dataset generator, coded with python. A high-quali
 
 # نمونه ها
 دیتاست زیر مجموعه 7 هزار کلمه و 55 نمونه به ازای هر کلمه است 
-https://www.kaggle.com/datasets/tahagorji/persian-word-handwritten-dataset/code
+https://www.kaggle.com/datasets/tahagorji/persian-word-handwritten-dataset/
 
 
 
