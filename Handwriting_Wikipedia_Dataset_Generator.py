@@ -37,6 +37,10 @@ Handwriting_Wikipedia_Dataset_Generator.py
                          (برای زبان‌های راست‌به‌چپ، ارقام فارسی ۰ تا ۹ نیز اضافه می‌شود)
     --shape              افزودن بیش از ۲۰ شکل پرکاربرد ریاضی (دایره، مثلث، مربع، ...)
                          به‌صورت دست‌کشیده؛ نام پوشه این کلاس‌ها پسوند __SHAPE دارد
+    --state-file PATH    استفاده مستقیم از یک فایل _state.json آماده؛
+                         در این حالت هیچ جستجویی در ویکی‌پدیا انجام نمی‌شود
+    --gpu                استفاده از کارت گرافیک (CUDA + PyTorch) برای عملیات
+                         رنگی/نوری تصاویر؛ در صورت نبود GPU خودکار به CPU برمی‌گردد
     --fonts-dir / --bg-dir / --output-dir   مسیرهای سفارشی
 
 نکته: هر فونت قبل از استفاده بررسی می‌شود که تمام حروفِ متن را پشتیبانی کند؛
@@ -50,6 +54,7 @@ import argparse
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import random
 import re
@@ -350,7 +355,15 @@ def _get_font(path: str, size: int) -> ImageFont.FreeTypeFont:
     if key not in _G["font_cache"]:
         if len(_G["font_cache"]) > 256:
             _G["font_cache"].clear()
-        _G["font_cache"][key] = ImageFont.truetype(path, size)
+        # موتور BASIC اجباری: اگر Pillow با libraqm نصب باشد، خودش هم متن را
+        # راست‌به‌چپ می‌چیند و چون ما قبلاً با bidi معکوس کرده‌ایم، متن دوبار
+        # برعکس می‌شد (ایران → ناریا). با BASIC فقط shaping خودمان اعمال می‌شود.
+        try:
+            layout = ImageFont.Layout.BASIC          # Pillow >= 9.2
+        except AttributeError:
+            layout = ImageFont.LAYOUT_BASIC          # Pillow قدیمی
+        _G["font_cache"][key] = ImageFont.truetype(path, size,
+                                                   layout_engine=layout)
     return _G["font_cache"][key]
 
 
@@ -710,29 +723,65 @@ def _make_background(text_w: int, text_h: int, rng: random.Random):
     return crop, (m_l, m_t)
 
 
+def _torch_cuda():
+    """بارگذاری تنبل PyTorch/CUDA در هر پردازش کارگر (کش‌شده)."""
+    if "torch" not in _G:
+        try:
+            import torch
+            _G["torch"] = torch if torch.cuda.is_available() else None
+        except Exception:
+            _G["torch"] = None
+    return _G["torch"]
+
+
+def _gpu_color_ops(img: Image.Image, rng: random.Random):
+    """سایه + روشنایی + کنتراست + گاما به‌صورت یکجا روی GPU."""
+    torch = _torch_cuda()
+    if torch is None:
+        return None
+    t = torch.from_numpy(np.asarray(img, dtype=np.float32).copy()).cuda()
+    h, w, _ = t.shape
+    if rng.random() < 0.6:  # سایه خطی ملایم
+        g0, g1 = rng.uniform(0.90, 0.99), rng.uniform(0.99, 1.03)
+        if rng.random() < 0.5:
+            t = t * torch.linspace(g0, g1, w, device=t.device)[None, :, None]
+        else:
+            t = t * torch.linspace(g0, g1, h, device=t.device)[:, None, None]
+    t = t * rng.uniform(0.9, 1.08)                       # روشنایی
+    m = t.mean()
+    t = (t - m) * rng.uniform(0.9, 1.1) + m              # کنتراست
+    t = ((t.clamp(0, 255) / 255.0) ** rng.uniform(0.9, 1.12)) * 255.0  # گاما
+    return Image.fromarray(t.clamp(0, 255).byte().cpu().numpy())
+
+
 def _photometric(img: Image.Image, rng: random.Random) -> Image.Image:
     """شبیه‌سازی دوربین/اسکنر: نور، کنتراست، گاما، بلور، سایه، فشرده‌سازی."""
-    # سایه ملایم خطی
-    if rng.random() < 0.6:
-        w, h = img.size
-        grad = np.linspace(rng.uniform(0.90, 0.99), rng.uniform(0.99, 1.03),
-                           w if rng.random() < 0.5 else h, dtype=np.float32)
-        arr = np.asarray(img, dtype=np.float32)
-        if len(grad) == w:
-            arr *= grad[None, :, None]
-        else:
-            arr *= grad[:, None, None]
-        img = Image.fromarray(arr.clip(0, 255).astype(np.uint8))
+    gpu_img = _gpu_color_ops(img, rng) if _G["cfg"].get("gpu") else None
+    if gpu_img is not None:
+        img = gpu_img
+        img = ImageEnhance.Color(img).enhance(rng.uniform(0.9, 1.1))
+    else:
+        # سایه ملایم خطی
+        if rng.random() < 0.6:
+            w, h = img.size
+            grad = np.linspace(rng.uniform(0.90, 0.99), rng.uniform(0.99, 1.03),
+                               w if rng.random() < 0.5 else h, dtype=np.float32)
+            arr = np.asarray(img, dtype=np.float32)
+            if len(grad) == w:
+                arr *= grad[None, :, None]
+            else:
+                arr *= grad[:, None, None]
+            img = Image.fromarray(arr.clip(0, 255).astype(np.uint8))
 
-    img = ImageEnhance.Brightness(img).enhance(rng.uniform(0.9, 1.08))
-    img = ImageEnhance.Contrast(img).enhance(rng.uniform(0.9, 1.1))
-    img = ImageEnhance.Color(img).enhance(rng.uniform(0.9, 1.1))
+        img = ImageEnhance.Brightness(img).enhance(rng.uniform(0.9, 1.08))
+        img = ImageEnhance.Contrast(img).enhance(rng.uniform(0.9, 1.1))
+        img = ImageEnhance.Color(img).enhance(rng.uniform(0.9, 1.1))
 
-    # گاما
-    gamma = rng.uniform(0.9, 1.12)
-    if abs(gamma - 1.0) > 0.02:
-        lut = [int(255 * (i / 255) ** gamma) for i in range(256)] * 3
-        img = img.point(lut)
+        # گاما
+        gamma = rng.uniform(0.9, 1.12)
+        if abs(gamma - 1.0) > 0.02:
+            lut = [int(255 * (i / 255) ** gamma) for i in range(256)] * 3
+            img = img.point(lut)
 
     # بلور بسیار کم (فوکوس/حرکت)
     if rng.random() < 0.7:
@@ -860,7 +909,8 @@ def parse_args():
     ap = argparse.ArgumentParser(
         description="تولید دیتاست تصاویر دست‌نویس مصنوعی از ویکی‌پدیا (CPU-Only)")
     ap.add_argument("--lang", default="fa", help="کد زبان ویکی‌پدیا (fa, en, ...)")
-    ap.add_argument("--keywords", nargs="+", required=True, help="کلیدواژه‌های اولیه")
+    ap.add_argument("--keywords", nargs="+", default=[],
+                    help="کلیدواژه‌های اولیه (در صورت استفاده از --state-file لازم نیست)")
     ap.add_argument("--max-unique-words", type=int, default=50000,
                     help="حداقل تعداد واژه/عبارت یکتای هدف")
     ap.add_argument("--window", type=int, default=1, help="تعداد کلمات هر تصویر")
@@ -874,6 +924,10 @@ def parse_args():
                     help="افزودن ارقام 0-9 (و ۰-۹ برای زبان‌های راست‌به‌چپ) به دیتاست")
     ap.add_argument("--shape", action="store_true",
                     help="افزودن بیش از ۲۰ شکل ریاضی دست‌کشیده (پوشه‌ها با پسوند __SHAPE)")
+    ap.add_argument("--state-file", default=None,
+                    help="مسیر فایل _state.json آماده؛ ویکی‌پدیا جستجو نمی‌شود")
+    ap.add_argument("--gpu", action="store_true",
+                    help="استفاده از CUDA (نیازمند PyTorch)؛ fallback خودکار به CPU")
     ap.add_argument("--font-min", type=int, default=34)
     ap.add_argument("--font-max", type=int, default=64)
     ap.add_argument("--fonts-dir", default="Base_Handwrite_Font")
@@ -889,6 +943,24 @@ def main():
     if args.lang in RTL_LANGS and not HAS_RTL_LIBS:
         print("[!] برای زبان‌های راست‌به‌چپ نصب کنید: pip install arabic-reshaper python-bidi")
         sys.exit(1)
+    if not args.keywords and not args.state_file:
+        print("[!] یکی از --keywords یا --state-file الزامی است.")
+        sys.exit(1)
+
+    # --gpu: بررسی CUDA (با fallback خودکار به CPU)
+    use_gpu, mp_ctx = False, None
+    if args.gpu:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                use_gpu = True
+                # با CUDA باید spawn استفاده شود؛ fork باعث کرش CUDA می‌شود
+                mp_ctx = multiprocessing.get_context("spawn")
+                print(f"— GPU فعال: {torch.cuda.get_device_name(0)} —")
+            else:
+                print("[!] CUDA در دسترس نیست؛ ادامه با CPU.")
+        except ImportError:
+            print("[!] PyTorch نصب نیست (pip install torch)؛ ادامه با CPU.")
 
     # فونت‌ها
     fonts_dir = Path(args.fonts_dir)
@@ -913,7 +985,23 @@ def main():
     # ---------- مرحله ۱: جمع‌آوری واژه‌ها (با قابلیت Resume) ----------
     sig = f"{args.lang}|{args.max_unique_words}|{args.window}|{args.stride}|{args.min_word_len}"
     units, articles, resume_partial = None, 0, None
-    if state_path.exists():
+
+    # --state-file: استفاده مستقیم از state آماده، بدون هیچ جستجویی در ویکی‌پدیا
+    if args.state_file:
+        sf = Path(args.state_file)
+        if not sf.exists():
+            print(f"[!] فایل state یافت نشد: {sf}")
+            sys.exit(1)
+        try:
+            st = json.loads(sf.read_text(encoding="utf-8"))
+            units = st["units"]
+            articles = st.get("articles", 0)
+        except Exception as e:
+            print(f"[!] فایل state نامعتبر است: {e}")
+            sys.exit(1)
+        print(f"[state-file] {len(units):,} واژه/عبارت بارگذاری شد؛ "
+              f"جستجوی ویکی‌پدیا انجام نمی‌شود.")
+    elif state_path.exists():
         try:
             st = json.loads(state_path.read_text(encoding="utf-8"))
             if st.get("sig") == sig:
@@ -987,12 +1075,13 @@ def main():
 
     print(f"— تولید تصاویر: {len(tasks):,} کلاس ناقص از {len(class_map):,} کلاس —")
 
-    cfg = {"font_min": args.font_min, "font_max": args.font_max}
+    cfg = {"font_min": args.font_min, "font_max": args.font_max, "gpu": use_gpu}
     workers = args.workers or os.cpu_count() or 4
     total_gen = total_skip = total_nofont = 0
 
     if tasks:
         with ProcessPoolExecutor(max_workers=workers,
+                                 mp_context=mp_ctx,
                                  initializer=_init_worker,
                                  initargs=(font_paths, bg_paths, cfg)) as ex:
             futures = [ex.submit(generate_class, t) for t in tasks]
