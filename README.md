@@ -1,8 +1,10 @@
 # Handwriting-Wikipedia-Dataset-Generator
 A wikipedia based Handwriting dataset generator, coded with python. A high-quality, curated dataset featuring words and sentences that are highly natural and closely resemble human handwriting.
 
-==========================================
 یک ابزار تولید مجموعه داده دست‌خط مبتنی بر ویکی‌پدیا که با زبان پایتون برنامه‌نویسی شده است. این مجموعه داده باکیفیت و گزینش‌شده، شامل کلمات و جملاتی است که بسیار طبیعی بوده و شباهت زیادی به دست‌خط انسان دارند
+
+==========================================
+
 
 
 # نمونه ها
