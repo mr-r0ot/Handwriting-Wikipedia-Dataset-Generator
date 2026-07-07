@@ -3,6 +3,10 @@ A wikipedia based Handwriting dataset generator, coded with python. A high-quali
 
 ==========================================
 
+# نمونه ها
+دیتاست زیر مجموعه 7 هزار کلمه و 55 نمونه به ازای هر کلمه است 
+https://www.kaggle.com/datasets/tahagorji/persian-word-handwritten-dataset/code
+
 
 یک ابزار تولید مجموعه داده دست‌خط مبتنی بر ویکی‌پدیا که با زبان پایتون برنامه‌نویسی شده است. این مجموعه داده باکیفیت و گزینش‌شده، شامل کلمات و جملاتی است که بسیار طبیعی بوده و شباهت زیادی به دست‌خط انسان دارند.
 
